@@ -2,14 +2,12 @@ library(vroom)
 library(timetk)
 library(tidyverse)
 library(patchwork)
+library(tidymodels)
 
 ID_train <- vroom("./train.csv") 
 ID_test <- vroom("./test.csv") 
 
 
-
-ID_train %>% 
-  plot_time_series(date, sales, .interactive = FALSE)
 
 store1_item3 <- ID_train %>% 
   filter(store ==1 & item ==3)
@@ -40,3 +38,131 @@ plot4 <- store10_item25 %>%
   forecast::ggAcf(.,lag.max= 2*365)
 
 (plot1 + plot2)/(plot3+plot4)
+
+##############
+
+
+storeItem <- ID_train %>% 
+  filter(store == 3, item == 7)
+
+my_recipe <- recipe(sales~., data = storeItem) %>% 
+  step_date(date, features =c("dow","month","year"))
+  
+  
+
+my_mod <- rand_forest(mtry = tune(),
+                      min_n = tune(),
+                      trees = 600) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+
+rf_workflow <- workflow() %>% 
+  add_recipe(my_recipe) %>% 
+  add_model(my_mod)
+
+tuning_grid <- grid_regular(mtry(range = c(1,6)),
+                            min_n(),
+                            levels = 5)
+
+folds <- vfold_cv(storeItem, v= 5, repeats = 1)
+
+
+CV_results <- rf_workflow %>% 
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(smape))
+
+bestTune <- CV_results %>% 
+  select_best("smape")
+
+
+collect_metrics(CV_results) %>% 
+  filter(bestTune) %>% 
+  pull(mean)
+
+final_wf <-
+  RF_amazon_workflow %>% 
+  finalize_workflow(bestTune) %>% 
+  fit(data = amazon_train)
+
+
+#########
+
+install.packages("modeltime")
+library(modeltime)
+
+
+train <- ID_train %>% filter(store == 3, item == 10)
+cv_split <- time_series_split(train, assess= "3 months", cumulative = TRUE)
+cv_split %>% tk_time_series_cv_plan() %>% 
+  plot_time_series_cv_plan(date, sales, .interactive = FALSE)
+
+es_model <- exp_smoothing() %>% 
+  set_engine("ets") %>% 
+  fit(sales~date, data =training(cv_split))
+
+cv_results <- modeltime_calibrate(es_model, 
+                                  new_data = testing(cv_split))
+p1 <-cv_results %>% 
+  modeltime_forecast(new_data = testing(cv_split),
+                     actual_data = train) %>% 
+  plot_modeltime_forecast(.interactive = TRUE)
+
+cv_results %>% modeltime_accuracy() %>% 
+  table_modeltime_accuracy(
+    .interactive = FALSE
+  )
+
+es_fullfit <- cv_results %>% 
+  modeltime_refit(data = train)
+
+es_preds <- es_fullfit %>% 
+  modeltime_forecast(h = "3 months") %>% 
+  rename(date= .index, sales = .value) %>% 
+  select(date, sales) %>% 
+  full_join(., y= ID_test, by= "date") %>% 
+  select(id, sales)
+
+p2 <-es_fullfit %>% 
+  modeltime_forecast(h = "3 months", actual_data = train) %>% 
+  plot_modeltime_forecast(.interactive = FALSE)
+
+##
+
+train2 <- ID_train %>% filter(store == 5, item == 7)
+cv_split <- time_series_split(train2, assess= "3 months", cumulative = TRUE)
+cv_split %>% tk_time_series_cv_plan() %>% 
+  plot_time_series_cv_plan(date, sales, .interactive = FALSE)
+
+es_model <- exp_smoothing() %>% 
+  set_engine("ets") %>% 
+  fit(sales~date, data =training(cv_split))
+
+cv_results <- modeltime_calibrate(es_model, 
+                                  new_data = testing(cv_split))
+p3 <-cv_results %>% 
+  modeltime_forecast(new_data = testing(cv_split),
+                     actual_data = train2) %>% 
+  plot_modeltime_forecast(.interactive = TRUE)
+
+cv_results %>% modeltime_accuracy() %>% 
+  table_modeltime_accuracy(
+    .interactive = FALSE
+  )
+
+es_fullfit <- cv_results %>% 
+  modeltime_refit(data = train)
+
+es_preds <- es_fullfit %>% 
+  modeltime_forecast(h = "3 months") %>% 
+  rename(date= .index, sales = .value) %>% 
+  select(date, sales) %>% 
+  full_join(., y= ID_test, by= "date") %>% 
+  select(id, sales)
+
+p4 <-es_fullfit %>% 
+  modeltime_forecast(h = "3 months", actual_data = train2) %>% 
+  plot_modeltime_forecast(.interactive = FALSE)
+plotly::subplot(p1,p3, p2,p4, nrows = 2)
+
